@@ -35,7 +35,7 @@ def init_chat_model(llm_type):
             deployment_name=DEPLOYMENT_NAME,
             openai_api_key=API_KEY,
             openai_api_type="azure",
-            temperature=1
+            temperature=0.1
         )
     elif llm_type == 'aws':
         bedrock_client = boto3.client(service_name="bedrock-runtime", region_name=os.environ['aws_region'],
@@ -45,7 +45,7 @@ def init_chat_model(llm_type):
             client=bedrock_client,
             model_id=os.environ['aws_model_id'],
             streaming=True,
-            model_kwargs={"temperature": 1})
+            model_kwargs={"temperature": 0.1})
     return llm
 
 
