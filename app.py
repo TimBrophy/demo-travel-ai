@@ -13,10 +13,14 @@ from langchain.schema import (
 from PIL import Image
 import pandas as pd
 import time
+import uuid
+from datetime import timezone, datetime
 
 st.session_state.llm = "azure"
 transformer_model = '.elser_model_2_linux-x86_64'
 search_index = 'search-travel-info'
+logging_index = 'llm_interactions'
+logging_pipeline = 'ml-inference-llm_interactions'
 
 if st.session_state.llm == 'aws':
     st.session_state.llm_model = os.environ['aws_model_id']
@@ -26,6 +30,41 @@ elif st.session_state.llm == 'azure':
     API_KEY = os.environ['openai_api_key']
     DEPLOYMENT_NAME = os.environ['DEPLOYMENT_NAME']
 
+es = Elasticsearch(os.environ['elastic_url'], api_key=os.environ['elastic_api_key'])
+
+def log_llm_interaction(question, prompt, response, sent_time, received_time, answer_type):
+    log_id = uuid.uuid4()
+    dt_latency = received_time - sent_time
+    actual_latency = dt_latency.total_seconds()
+    body = {
+        "@timestamp": datetime.now(tz=timezone.utc),
+        "question": question,
+        "answer": response,
+        "provider": st.session_state.llm,
+        "model": st.session_state.llm_model,
+        "timestamp_sent": sent_time,
+        "timestamp_received": received_time,
+        "answer_type": answer_type,
+        "llm_latency": actual_latency
+
+    }
+    response = es.index(index=logging_index, id=log_id, document=body)
+    return
+
+def check_qa_log(question):
+    model_id = transformer_model
+    query = {
+                "match": {
+                    "question": question
+                }
+            }
+
+    cache_results = es.search(index=logging_index, query=query, size=1)
+    if cache_results['hits']['total']['value'] > 0:
+        answer_value = cache_results['hits']['hits'][0]['_source']['answer']
+    else:
+        answer_value = 0
+    return answer_value
 
 def init_chat_model(llm_type):
     if llm_type == 'azure':
@@ -35,7 +74,7 @@ def init_chat_model(llm_type):
             deployment_name=DEPLOYMENT_NAME,
             openai_api_key=API_KEY,
             openai_api_type="azure",
-            temperature=0.1
+            temperature=2
         )
     elif llm_type == 'aws':
         bedrock_client = boto3.client(service_name="bedrock-runtime", region_name=os.environ['aws_region'],
@@ -45,7 +84,7 @@ def init_chat_model(llm_type):
             client=bedrock_client,
             model_id=os.environ['aws_model_id'],
             streaming=True,
-            model_kwargs={"temperature": 0.1})
+            model_kwargs={"temperature": 1})
     return llm
 
 
@@ -57,7 +96,6 @@ def truncate_text(text, max_tokens):
 
 
 def content_search(index, question):
-    es = Elasticsearch(os.environ['elastic_url'], api_key=os.environ['elastic_api_key'])
     model_id = transformer_model
     query = {
         "bool": {
@@ -137,7 +175,8 @@ question = st.text_input("Question", placeholder="What would you like to know?")
 submitted = st.button("search")
 
 if submitted:
-    chat_model = init_chat_model(st.session_state.llm)
+    existing_answer = check_qa_log(question)
+    # existing_answer = 0
     results = content_search(search_index, question)
     df_results = pd.DataFrame(results)
     with st.status("Searching the data...") as status:
@@ -145,13 +184,25 @@ if submitted:
     with st.chat_message("ai travel assistant", avatar="🤖"):
         full_response = ""
         message_placeholder = st.empty()
+        sent_time = datetime.now(tz=timezone.utc)
         prompt = construct_prompt(question, results)
-        current_chat_message = chat_model(prompt).content
+        if existing_answer == 0:
+            chat_model = init_chat_model(st.session_state.llm)
+            current_chat_message = chat_model(prompt).content
+            answer_type = 'original'
+        else:
+            current_chat_message = existing_answer
+            answer_type = 'existing'
+        # current_chat_message = chat_model(prompt).content
         for chunk in current_chat_message.split():
             full_response += chunk + " "
-            time.sleep(0.05)
+            time.sleep(0.02)
             # Add a blinking cursor to simulate typing
             message_placeholder.markdown(full_response + "▌")
         message_placeholder.markdown(full_response)
+        received_time = datetime.now(tz=timezone.utc)
+        string_prompt = str(prompt)
+        log_llm_interaction(question, string_prompt, current_chat_message, sent_time, received_time,
+                            answer_type)
         status.update(label="AI response complete!", state="complete")
     st.dataframe(df_results)
